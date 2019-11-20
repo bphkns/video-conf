@@ -28,10 +28,4 @@ export class AuthController {
         }
     }
 
-    @Get('test')
-    @UseGuards(AuthGuard('jwt'), TeacherGuard)
-    async test(@Request() req) {
-        return req.user;
-    }
-
 }

@@ -1,17 +1,27 @@
-import { Controller, UseGuards, Post, Body } from '@nestjs/common';
+import { Controller, UseGuards, Post, Body, Req, Get } from '@nestjs/common';
 import { ClassService } from './class.service';
 import { AuthGuard } from '@nestjs/passport';
 import { TeacherGuard } from '../shared/auth/teacher.guard';
 import { CreateClassDto } from './dto/create-class.dto';
+import { SubjectService } from '../subject/subject.service';
+import { Teacher } from '../entities/teacher.entity';
+import request = require('superagent');
 
 @Controller('classes')
 @UseGuards(AuthGuard('jwt'))
 export class ClassController {
-    constructor(private classService: ClassService) { }
+    constructor(private classService: ClassService, private subjectService: SubjectService) { }
 
-    @Post()
+    @Post('create')
     @UseGuards(TeacherGuard)
-    async createClass(@Body() createClassDto: CreateClassDto) {
-        return await this.classService.createClass(createClassDto);
+    async createClass(@Req() req, @Body() createClassDto: CreateClassDto) {
+        const subject = await this.subjectService.create(createClassDto.subject);
+        const teacher: Teacher = req.user;
+        return await this.classService.create({ subject, teacher });
+    }
+
+    @Get()
+    async getClasses() {
+        return await this.classService.getLiveClasses();
     }
 }

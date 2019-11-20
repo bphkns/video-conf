@@ -1,4 +1,4 @@
-import { Entity, CreateDateColumn, UpdateDateColumn, PrimaryGeneratedColumn, OneToOne, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, CreateDateColumn, UpdateDateColumn, PrimaryGeneratedColumn, OneToOne, ManyToOne, JoinColumn, Column } from 'typeorm';
 import { Teacher } from './teacher.entity';
 import { Subject } from './subject.entity';
 
@@ -13,6 +13,9 @@ export class ClassDetails {
     @OneToOne(type => Subject)
     @JoinColumn()
     subject: Subject;
+
+    @Column({ type: 'timestamp', default: null })
+    endedAt: Date;
 
     @CreateDateColumn({ type: 'timestamp', name: 'created_at' })
     createdAt: Date;

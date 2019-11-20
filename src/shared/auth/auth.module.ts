@@ -21,5 +21,6 @@ import { TeacherGuard } from './teacher.guard';
     ],
     controllers: [AuthController],
     providers: [AuthService, LocalStrategy, JwtStrategy, TeacherGuard],
+    exports: [AuthService, TeacherGuard],
 })
 export class AuthModule { }
