@@ -1,0 +1,24 @@
+{
+    "type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "password": "",
+    "database": "video-conf",
+    "synchronize": false,
+    "migrationsRun": true,
+    "timezone": "+05:30",
+    "entities": [
+        "./dist/entities/*.entity.js"
+    ],
+    "subscribers": [
+        "./dist/subscribers/*.subscriber.js"
+    ],
+    "migrations": [
+        "./dist/migrations/*.js"
+    ],
+    "logging": "all",
+    "cli": {
+        "migrationsDir": "./src/migrations"
+    }
+}
