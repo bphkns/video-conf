@@ -18,4 +18,8 @@ export class ClassService {
         const classDetails = await this.classRepository.findOne(id, { relations: ['teacher', 'subject'] });
         return classDetails.teacher;
     }
+
+    async getClassDetails(id: string) {
+        return await this.classRepository.findOne(id, { relations: ['teacher', 'subject'] });
+    }
 }
