@@ -8,6 +8,7 @@
     "synchronize": false,
     "migrationsRun": true,
     "timezone": "+05:30",
+    "logging": "all",
     "entities": [
         "./dist/entities/*.entity.js"
     ],

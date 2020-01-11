@@ -1,26 +1,30 @@
-import { MessageBody, OnGatewayConnection, SubscribeMessage, WebSocketGateway, WebSocketServer, WsResponse, OnGatewayDisconnect, ConnectedSocket } from '@nestjs/websockets';
+import { Logger } from '@nestjs/common';
+import { ConnectedSocket, MessageBody, OnGatewayDisconnect, SubscribeMessage, WebSocketGateway, WebSocketServer, WsResponse } from '@nestjs/websockets';
 import * as mediasoup from 'mediasoup';
-import { Producer, Router, Worker, Transport, Consumer, WebRtcTransport } from 'mediasoup/lib/types';
-import { Server, Socket, Client } from 'socket.io';
+import { Consumer, Producer, Router, WebRtcTransport, Worker } from 'mediasoup/lib/types';
+import { Server, Socket } from 'socket.io';
 import { config } from '../../config';
 import { ClassDetails } from '../../entities/class.entity';
 import { ClassService } from '../class.service';
-import { Logger } from '@nestjs/common';
 
 interface RoomStudent {
+    teacherAudioConsumer?: Consumer;
     isProducer: boolean;
     producer?: Producer;
+    audioProducer?: Producer;
     consumerTransport?: WebRtcTransport;
     consumer?: Consumer;
+    audioConsumer?: Consumer;
     teacherConsumer?: Consumer;
     producerTransport?: WebRtcTransport;
-    consumers?: Map<string, Consumer>;
+    consumers?: Map<string, { consumer: Consumer, audioConsumer: Consumer }>;
     socket?: Socket;
 }
 
 interface Room {
     teacher: {
         producer?: Producer;
+        audioProducer?: Producer;
         producerTransport?: WebRtcTransport;
         consumerTransport?: WebRtcTransport;
         state?: string;
@@ -44,6 +48,18 @@ export class ClassGateway implements OnGatewayDisconnect {
     mediasoupRouter: Router;
     rooms = new Map<string, Room>();
     roomIds: string[] = [];
+    drawingData = new Map<string, {
+        config: {
+            lineSize: string,
+            pencilColor: string,
+            canvasBackgroundColor: string,
+            mode: string
+        },
+        data: any[]
+    }>();
+    studentsOnClassPage = new Map<string, string[]>();
+    studentsOnClassIds = [];
+
 
     constructor(private classService: ClassService) { }
 
@@ -118,15 +134,38 @@ export class ClassGateway implements OnGatewayDisconnect {
     }
 
     handleDisconnect(socket: Socket) {
+
+        this.studentsOnClassIds.forEach(classId => {
+            if (this.studentsOnClassPage.has(classId)) {
+                let students = this.studentsOnClassPage.get(classId);
+                students = students.filter(id => id !== socket.id);
+                if (students.length > 0) {
+                    this.studentsOnClassPage.set(classId, students);
+                }
+
+                if (students.length === 0) {
+                    this.studentsOnClassIds = this.studentsOnClassIds.filter(id => id !== classId);
+                    this.studentsOnClassPage.delete(classId);
+                }
+            }
+
+            console.log(this.studentsOnClassPage.get(classId));
+        })
+
         this.roomIds.forEach(roomId => {
             const room = this.rooms.get(roomId);
             if (room.teacher.socket && room.teacher.socket.id === socket.id) {
                 Logger.log(`Current teacher session disconnected :${roomId}`);
-                room.teacher.state = 'paused';
                 room.teacher.socket = null;
+                room.teacher.state = 'paused';
                 if (room.teacher.producerTransport) room.teacher.producerTransport.close();
-
                 room.teacher.producerTransport === null;
+                room.studentIds.forEach(id => {
+                    const student = room.students.get(id);
+                    if (student.socket) {
+                        this.server.to(student.socket.id).emit('teacher-temporary-disconnected');
+                    }
+                });
                 return;
             }
 
@@ -139,6 +178,17 @@ export class ClassGateway implements OnGatewayDisconnect {
                     if (student.consumerTransport) student.consumerTransport.close();
                     student.consumerTransport = null;
                     if (room.teacher && room.teacher.socket) this.server.to(room.teacher.socket.id).emit('student-disconnected', { studentId: id });
+
+                    const studentsList = room.studentIds.filter(sId => {
+                        const student = room.students.get(sId);
+                        return student.socket && id !== sId;
+                    });
+
+                    studentsList.forEach(sId => {
+                        const student = room.students.get(sId);
+                        this.server.to(student.socket.id).emit('other-student-disconnected', { studentId: id });
+                    });
+
                     return;
                 }
             });
@@ -205,11 +255,40 @@ export class ClassGateway implements OnGatewayDisconnect {
     async produce(@MessageBody() data) {
         const { classId, kind, rtpParameters } = data;
         const room = this.rooms.get(classId);
-        room.teacher.producer = await room.teacher.producerTransport.produce({ kind, rtpParameters });
-        Logger.log(`Teacher producer Id: ${room.teacher.producer.id}`);
-        return Promise.resolve({
-            event: 'teacher-produced',
-            data: { id: room.teacher.producer.id }
+        if (kind === 'video') {
+            room.teacher.producer = await room.teacher.producerTransport.produce({ kind, rtpParameters });
+            Logger.log(`Teacher video producer Id: ${room.teacher.producer.id}`);
+            return Promise.resolve({
+                event: 'teacher-produced',
+                data: { id: room.teacher.producer.id }
+            });
+        }
+        if (kind === 'audio') {
+            room.teacher.audioProducer = await room.teacher.producerTransport.produce({ kind, rtpParameters });
+            Logger.log(`Teacher audio producer Id: ${room.teacher.audioProducer.id}`);
+            return Promise.resolve({
+                event: 'teacher-produced',
+                data: { id: room.teacher.audioProducer.id }
+            });
+        }
+    }
+
+    @SubscribeMessage('teacher-connect-with-exisisting-students')
+    async connectWithOldStudents(@MessageBody() data) {
+        const { classId } = data;
+        const room = this.rooms.get(classId);
+        const waitingRoom = this.studentsOnClassPage.has(classId) ? this.studentsOnClassPage.get(classId) : [];
+
+        waitingRoom.forEach(id => {
+            this.server.to(id).emit('teacher-started-class');
+        });
+
+        room.studentIds.forEach(id => {
+            const student = room.students.get(id);
+            if (student.socket) {
+                this.server.to(room.teacher.socket.id).emit('new-student-joined', { studentId: id });
+                this.server.to(student.socket.id).emit('teacher-connect-again');
+            }
         });
     }
 
@@ -246,10 +325,9 @@ export class ClassGateway implements OnGatewayDisconnect {
         const remoteStudent = room.students.get(otherStudentId);
         try {
             remoteStudent.teacherConsumer = await this.createConsumerForTransport(remoteStudent.producer, room.teacher.consumerTransport, rtpCapabilities);
-        } catch (e) {
-            Logger.log(`Error` + e);
-        }
-        return Promise.resolve({
+            remoteStudent.teacherAudioConsumer = await this.createConsumerForTransport(remoteStudent.audioProducer, room.teacher.consumerTransport, rtpCapabilities);
+        } catch (e) { console.log(e) }
+        return ({
             event: 'consumed-student',
             data:
             {
@@ -259,7 +337,13 @@ export class ClassGateway implements OnGatewayDisconnect {
                 rtpParameters: remoteStudent.teacherConsumer.rtpParameters,
                 type: remoteStudent.teacherConsumer.type,
                 producerPaused: remoteStudent.teacherConsumer.producerPaused,
-                otherStudentId
+                otherStudentId,
+                audioProducerId: remoteStudent.audioProducer.id,
+                audioId: remoteStudent.teacherAudioConsumer.id,
+                audioKind: remoteStudent.teacherAudioConsumer.kind,
+                auidoRtpParameters: remoteStudent.teacherAudioConsumer.rtpParameters,
+                audioType: remoteStudent.teacherAudioConsumer.type,
+                audioProducerPaused: remoteStudent.teacherAudioConsumer.producerPaused,
             }
         });
     }
@@ -271,9 +355,39 @@ export class ClassGateway implements OnGatewayDisconnect {
         const room = this.rooms.get(classId);
         const remoteStudent = room.students.get(studentId);
         await remoteStudent.teacherConsumer.resume();
-
+        await remoteStudent.teacherAudioConsumer.resume();
         return Promise.resolve({
             event: 'student-video-resumed-for-teacher'
+        });
+    }
+
+    @SubscribeMessage('end-class')
+    async endClass(@MessageBody() data) {
+        const { classId } = data;
+        console.log(classId);
+        console.log(await this.classService.endClass(classId));
+        const room = this.rooms.get(classId);
+        this.roomIds = this.roomIds.filter(id => id !== classId);
+        room.studentIds.forEach(sId => {
+            const student = room.students.get(sId);
+            student.producer.close();
+            student.consumer.close();
+            student.teacherConsumer.close();
+            student.audioProducer.close();
+            student.teacherAudioConsumer.close();
+            student.audioConsumer.close();
+            student.consumers.clear();
+
+            if (student.socket) {
+                this.server.to(student.socket.id).emit('class-ended');
+            }
+        });
+
+        room.teacher.producer.close();
+        room.teacher.audioProducer.close();
+        this.rooms.delete(classId);
+        return Promise.resolve({
+            event: 'class-ended'
         });
     }
 
@@ -287,11 +401,29 @@ export class ClassGateway implements OnGatewayDisconnect {
      * Student Start
      */
 
+    @SubscribeMessage('listenting-teacher')
+    async addWaitingStudentsOnpage(@MessageBody() data, @ConnectedSocket() socket: Socket) {
+        const { classId } = data;
+        console.log(this.studentsOnClassPage.has(classId));
+        let classDetails = [];
+        if (!this.studentsOnClassPage.has(classId)) {
+            this.studentsOnClassPage.set(classId, classDetails);
+            this.studentsOnClassIds.push(classId);
+        }
+
+        classDetails = this.studentsOnClassPage.get(classId);
+        classDetails.push(socket.id);
+        console.log(this.studentsOnClassPage.get(classId));
+    }
+
     @SubscribeMessage('get-class-details')
     async getClassDetails(@MessageBody() data) {
         const { classId } = data;
         const classDetails = await this.classService.getClassDetails(classId);
-        const state = this.rooms.has(classId) ? this.rooms.get(classId).teacher.state : 'not-started';
+        let state = this.rooms.has(classId) ? this.rooms.get(classId).teacher.state : 'not-started';
+        if (classDetails.endedAt) {
+            state = 'ended';
+        }
         return {
             event: 'take-class-details',
             data: {
@@ -308,7 +440,7 @@ export class ClassGateway implements OnGatewayDisconnect {
         if (!room.students.has(userId)) {
             const roomStudentInfo = {
                 isProducer: false,
-                consumers: new Map<string, Consumer>()
+                consumers: new Map<string, { consumer: Consumer, audioConsumer: Consumer }>()
             }
 
             room.studentIds.push(userId);
@@ -348,6 +480,7 @@ export class ClassGateway implements OnGatewayDisconnect {
         const room = this.rooms.get(classId);
         const student = room.students.get(userId);
         student.consumer = await this.createConsumerForTransport(room.teacher.producer, student.consumerTransport, rtpCapabilities);
+        student.audioConsumer = await this.createConsumerForTransport(room.teacher.audioProducer, student.consumerTransport, rtpCapabilities);
         return Promise.resolve({
             event: 'consumed-teacher',
             data:
@@ -357,7 +490,13 @@ export class ClassGateway implements OnGatewayDisconnect {
                 kind: student.consumer.kind,
                 rtpParameters: student.consumer.rtpParameters,
                 type: student.consumer.type,
-                producerPaused: student.consumer.producerPaused
+                producerPaused: student.consumer.producerPaused,
+                audioProducerId: room.teacher.audioProducer.id,
+                audioId: student.audioConsumer.id,
+                audioKind: student.audioConsumer.kind,
+                auidoRtpParameters: student.audioConsumer.rtpParameters,
+                audioType: student.audioConsumer.type,
+                audioProducerPaused: student.audioConsumer.producerPaused,
             }
         });
     }
@@ -368,7 +507,7 @@ export class ClassGateway implements OnGatewayDisconnect {
         const room = this.rooms.get(classId);
         const student = room.students.get(userId);
         await student.consumer.resume();
-
+        await student.audioConsumer.resume();
         return Promise.resolve({
             event: 'teacher-resumed'
         });
@@ -380,7 +519,6 @@ export class ClassGateway implements OnGatewayDisconnect {
         const room = this.rooms.get(classId);
         const student = room.students.get(userId);
         student.producerTransport = await this.createTransport();
-
         return Promise.resolve({
             event: 'started-student-video',
             data: {
@@ -408,19 +546,29 @@ export class ClassGateway implements OnGatewayDisconnect {
         const { classId, kind, rtpParameters, userId } = data;
         const room = this.rooms.get(classId);
         const student = room.students.get(userId);
-        student.producer = await student.producerTransport.produce({ kind, rtpParameters });
-        Logger.log(`Student producer Id: ${student.producer.id}`);
-        this.server.to(room.teacher.socket.id).emit('new-student-joined', { studentId: userId });
-        room.studentIds.forEach(id => {
-            const student = room.students.get(id);
-            if (student.socket && id !== userId) {
-                this.server.to(student.socket.id).emit('new-other-student', { studentId: userId });
-            }
-        });
-        return Promise.resolve({
-            event: 'student-produced',
-            data: { id: student.producer.id }
-        });
+        if (kind === 'video') {
+            student.producer = await student.producerTransport.produce({ kind, rtpParameters });
+            return Promise.resolve({
+                event: 'student-produced',
+                data: { id: student.producer.id }
+            });
+        }
+
+        if (kind === 'audio') {
+            student.audioProducer = await student.producerTransport.produce({ kind, rtpParameters });
+            Logger.log(`Student producer Id: ${student.producer.id}`);
+            this.server.to(room.teacher.socket.id).emit('new-student-joined', { studentId: userId });
+            room.studentIds.forEach(id => {
+                const student = room.students.get(id);
+                if (student.socket && id !== userId) {
+                    this.server.to(student.socket.id).emit('new-other-student', { studentId: userId });
+                }
+            });
+            return Promise.resolve({
+                event: 'student-produced',
+                data: { id: student.audioProducer.id }
+            });
+        }
     }
 
     @SubscribeMessage('consume-other-student-video')
@@ -429,16 +577,14 @@ export class ClassGateway implements OnGatewayDisconnect {
         const room = this.rooms.get(classId);
         const student = room.students.get(userId);
         const remoteStudent = room.students.get(otherStudentId);
-        Logger.log('transport' + remoteStudent.producer.id);
-        let consumer;
+        let consumer, audioConsumer;
         try {
             consumer = await this.createConsumerForTransport(remoteStudent.producer, student.consumerTransport, rtpCapabilities);
-            Logger.log(consumer);
+            audioConsumer = await this.createConsumerForTransport(remoteStudent.audioProducer, student.consumerTransport, rtpCapabilities);
         } catch (err) {
             Logger.log(`err :::` + err);
         }
-        remoteStudent.consumers.set(userId, consumer);
-        Logger.log(data);
+        remoteStudent.consumers.set(userId, { consumer, audioConsumer });
         return Promise.resolve({
             event: 'other-student-video-consumed',
             data:
@@ -448,7 +594,14 @@ export class ClassGateway implements OnGatewayDisconnect {
                 kind: consumer.kind,
                 rtpParameters: consumer.rtpParameters,
                 type: consumer.type,
-                producerPaused: consumer.producerPaused
+                producerPaused: consumer.producerPaused,
+                otherStudentId,
+                audioProducerId: remoteStudent.audioProducer.id,
+                audioId: audioConsumer.id,
+                audioKind: audioConsumer.kind,
+                auidoRtpParameters: audioConsumer.rtpParameters,
+                audioType: audioConsumer.type,
+                audioProducerPaused: audioConsumer.producerPaused,
             }
         });
     }
@@ -458,299 +611,137 @@ export class ClassGateway implements OnGatewayDisconnect {
         const { classId, userId, otherStudentId } = data;
         const room = this.rooms.get(classId);
         const remoteStudent = room.students.get(otherStudentId);
-        const consumer = remoteStudent.consumers.get(userId);
+        const { consumer, audioConsumer } = remoteStudent.consumers.get(userId);
         await consumer.resume();
+        await audioConsumer.resume();
         return Promise.resolve({
             event: 'other-student-video-resumed'
         });
     }
+
+    @SubscribeMessage('get-already-joined-students')
+    async getAlreadyJoinedStudents(@MessageBody() data) {
+        const { classId, userId } = data;
+        const room = this.rooms.get(classId);
+        const studentsList = room.studentIds.filter(id => {
+            const student = room.students.get(id);
+            return student.socket && id !== userId && student.producer;
+        });
+
+        return Promise.resolve({
+            'event': 'got-already-joined-students',
+            data: studentsList
+        })
+    }
     /**
      * Student part end
+     * 
+     * Drawing part start
      */
 
-    @SubscribeMessage('create-consumer-transport')
-    async createConsumerTransport(@MessageBody() data, @ConnectedSocket() socket: Socket) {
-        const {
-            maxIncomingBitrate,
-            initialAvailableOutgoingBitrate
-        } = config.mediasoup.webRtcTransport;
+    @SubscribeMessage('get-drawingboard')
+    async getDrawingBoard(@MessageBody() data) {
+        const { classId } = data;
+        const dRoom = this.drawingData.get(classId);
+        let drawData = [];
+        if (dRoom) {
+            drawData = dRoom.data;
+        }
 
-        const { classId, userId } = data;
-
-        const room = this.rooms.get(classId);
-        let roomStudent: RoomStudent;
-        const transport = await this.mediasoupRouter.createWebRtcTransport({
-            listenIps: config.mediasoup.webRtcTransport.listenIps,
-            enableUdp: true,
-            enableTcp: true,
-            preferUdp: true,
-            initialAvailableOutgoingBitrate,
+        return Promise.resolve({
+            event: 'take-drawingboard',
+            data: dRoom
         });
-        if (room.teacher.id !== userId) {
-            roomStudent = {
-                isProducer: false,
-                consumerTransport: transport,
-                socket: socket
+    }
+
+    @SubscribeMessage('set-drawing-config')
+    async setDrawingConfig(@MessageBody() data) {
+        const { classId,
+            lineSize,
+            pencilColor,
+            canvasBackgroundColor,
+            mode } = data;
+
+        const dRoom = this.drawingData.get(classId);
+        if (!dRoom) {
+            const config = {
+                lineSize,
+                pencilColor,
+                canvasBackgroundColor,
+                mode
             };
-
-            room.students.set(userId, roomStudent);
-            // }
-
-            if (maxIncomingBitrate) {
-                try {
-                    await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-                } catch (error) {
-                }
-            }
-
-            return Promise.resolve({
-                event: 'consumer-transport-created',
-                data: {
-                    id: transport.id,
-                    iceParameters: transport.iceParameters,
-                    iceCandidates: transport.iceCandidates,
-                    dtlsParameters: transport.dtlsParameters
-                }
-            });
+            this.drawingData.set(classId, { config, data: [] })
         }
-
-        if (room.teacher.id === userId) {
-            if (!room.teacher.consumerTransport) {
-                room.teacher.consumerTransport = transport;
-                if (maxIncomingBitrate) {
-                    try {
-                        await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-                    } catch (error) {
-                    }
-                }
-
-            }
-            return Promise.resolve({
-                event: 'consumer-transport-created',
-                data: {
-                    id: transport.id,
-                    iceParameters: transport.iceParameters,
-                    iceCandidates: transport.iceCandidates,
-                    dtlsParameters: transport.dtlsParameters
-                }
-            });
-        }
-    }
-
-
-    @SubscribeMessage('connect-consumer-transport')
-    async connectConsumerTransport(client: Socket, @MessageBody() data) {
-        const { dtlsParameters, classId, userId } = data;
         const room = this.rooms.get(classId);
-        if (userId !== room.teacher.id) {
-            const roomStudent = room.students.get(userId);
-            await roomStudent.consumerTransport.connect({ dtlsParameters });
-            return Promise.resolve({
-                event: 'consumer-transport-connected'
-            });
-        }
-
-        if (userId === room.teacher.id) {
-            await room.teacher.consumerTransport.connect({ dtlsParameters });
-            return Promise.resolve({
-                event: 'consumer-transport-connected'
-            });
-        }
-    }
-
-    @SubscribeMessage('consume')
-    async consume(@MessageBody() data) {
-        const { rtpCapabilities, classId, userId, remoteUserId } = data;
-        const room = this.rooms.get(classId);
-        if (room.teacher.id !== userId) {
-            const roomStudent = room.students.get(userId);
-            const dataConsumer = await this.createConsumer(room.teacher.producer, roomStudent, rtpCapabilities);
-            return Promise.resolve({
-                event: 'consumed',
-                data: dataConsumer
-            });
-        }
-
-        if (room.teacher.id === userId) {
-            const remoteRoomStudent = room.students.get(remoteUserId);
-            remoteRoomStudent.teacherConsumer = await room.teacher.consumerTransport.consume({
-                producerId: remoteRoomStudent.producer.id,
-                rtpCapabilities,
-                paused: true
-            });
-            return Promise.resolve({
-                event: 'consumed',
-                data: {
-                    producerId: remoteRoomStudent.producer.id,
-                    id: remoteRoomStudent.teacherConsumer.id,
-                    kind: remoteRoomStudent.teacherConsumer.kind,
-                    rtpParameters: remoteRoomStudent.teacherConsumer.rtpParameters,
-                    type: remoteRoomStudent.teacherConsumer.type,
-                    producerPaused: remoteRoomStudent.teacherConsumer.producerPaused,
-                    studentId: remoteUserId
-                }
-            });
-        }
-    }
-
-    @SubscribeMessage('consume-other-student')
-    async consumeOtherStudent(@MessageBody() data: any) {
-
-        const { rtpCapabilities, classId, userId, remoteUserId } = data;
-        const room = this.rooms.get(classId);
-        const remoteRoom = room.students.get(remoteUserId);
-        const userRoom = room.students.get(userId);
-        Logger.log('Consumer:');
-        let consumer;
-        try {
-            consumer = await userRoom.consumerTransport.consume({
-                producerId: remoteRoom.producer.id,
-                rtpCapabilities,
-                paused: true
-            });
-        } catch (e) {
-            Logger.log(e);
-        }
-
-        userRoom.consumers.set(remoteUserId, consumer);
-        return Promise.resolve({
-            event: 'other-student-consumed',
-            data: {
-                producerId: remoteRoom.producer.id,
-                id: consumer.id,
-                kind: consumer.kind,
-                rtpParameters: consumer.rtpParameters,
-                type: consumer.type,
-                producerPaused: consumer.producerPaused,
-                studentId: remoteUserId
-            }
-        });
-    }
-
-    async createConsumer(producer, roomStudent: RoomStudent, rtpCapabilities: any) {
-
-        roomStudent.consumer = await roomStudent.consumerTransport.consume({
-            producerId: producer.id,
-            rtpCapabilities,
-            paused: true,
-        });
-
-        return {
-            producerId: producer.id,
-            id: roomStudent.consumer.id,
-            kind: roomStudent.consumer.kind,
-            rtpParameters: roomStudent.consumer.rtpParameters,
-            type: roomStudent.consumer.type,
-            producerPaused: roomStudent.consumer.producerPaused
+        dRoom.config = {
+            lineSize,
+            pencilColor,
+            canvasBackgroundColor,
+            mode
         };
-    }
 
-    @SubscribeMessage('resume')
-    async resume(@MessageBody() data) {
-        const { classId, userId, remoteUserId } = data;
-        const room = this.rooms.get(classId);
-        if (room.teacher.id !== userId) {
-            const roomStudent = room.students.get(userId);
-            await roomStudent.consumer.resume();
+        room.studentIds.forEach(sId => {
+            const student = room.students.get(sId);
 
-            return Promise.resolve({
-                event: 'resumed'
-            });
-        }
-
-        if (room.teacher.id === userId) {
-            const remoteRoomStudent = room.students.get(remoteUserId);
-            await remoteRoomStudent.teacherConsumer.resume();
-            return Promise.resolve({
-                event: 'resumed'
-            });
-        }
-    }
-
-    @SubscribeMessage('resume-other-student')
-    async resumeOtherStudent(@MessageBody() data) {
-        const { classId, userId, remoteUserId } = data;
-        const room = this.rooms.get(classId);
-        const userRoom = room.students.get(userId);
-        const remoteConsumer = userRoom.consumers.get(remoteUserId);
-        if (remoteConsumer) {
-            await remoteConsumer.resume();
-        }
-        return Promise.resolve({
-            event: 'other-student-consumed'
+            if (student.socket) {
+                this.server.to(student.socket.id).emit('drawing-config', {
+                    lineSize,
+                    pencilColor,
+                    canvasBackgroundColor,
+                    mode
+                });
+            }
         });
     }
 
+    @SubscribeMessage('teacher-send-drawing')
+    async teacherSendDrawing(@MessageBody() data) {
+        const { prevPos, currentPos, classId } = data;
+        const dRoom = this.drawingData.get(classId);
+        dRoom.data.push({ prevPos, currentPos });
 
+        const room = this.rooms.get(classId);
 
-    // @SubscribeMessage('start-student-video')
-    // async startStudentVideo(@MessageBody() data) {
-    //     const { userId, classId, rtpCapabilities } = data;
-    //     const room = this.rooms.get(classId);
-    //     const roomStudent = room.students.get(userId);
-    //     const {
-    //         maxIncomingBitrate,
-    //         initialAvailableOutgoingBitrate
-    //     } = config.mediasoup.webRtcTransport;
-    //     roomStudent.producerTransport = await this.mediasoupRouter.createWebRtcTransport({
-    //         listenIps: config.mediasoup.webRtcTransport.listenIps,
-    //         enableUdp: true,
-    //         enableTcp: true,
-    //         preferUdp: true,
-    //         initialAvailableOutgoingBitrate,
-    //     });
+        room.studentIds.forEach(sId => {
+            const student = room.students.get(sId);
 
-    //     if (maxIncomingBitrate) {
-    //         try {
-    //             await room.teacher.producerTransport.setMaxIncomingBitrate(maxIncomingBitrate);
-    //         } catch (error) {
-    //         }
-    //     }
-
-    //     return Promise.resolve({
-    //         event: 'student-producer-transport-started',
-    //         data: {
-    //             id: roomStudent.producerTransport.id,
-    //             iceParameters: roomStudent.producerTransport.iceParameters,
-    //             iceCandidates: roomStudent.producerTransport.iceCandidates,
-    //             dtlsParameters: roomStudent.producerTransport.dtlsParameters
-    //         }
-    //     });
-    // }
-
-    handleConnection(client: Socket, ...args: any[]) {
-        // console.log(client);
+            if (student.socket) {
+                this.server.to(student.socket.id).emit('drawing-data', { prevPos, currentPos });
+            }
+        });
     }
 
-    // handleDisconnect(socket: Socket) {
-    //     let room: Room;
-    //     for (const [roomId, roomDetails] of this.rooms) {
-    //         room = this.rooms.get(roomId);
-    //         if (room.teacher && room.teacher.socket && room.teacher.socket.id === socket.id) {
-    //             if (room.teacher.producerTransport) room.teacher.producerTransport.close();
-    //             if (room.teacher.consumerTransport) room.teacher.consumerTransport.close();
+    @SubscribeMessage('clear-drawing')
+    async clearDrawing(@MessageBody() data) {
+        const { classId } = data;
 
-    //             room.teacher.state = 'disconnected';
-    //             room.students.forEach(student => {
-    //                 this.server.to(student.socket.id).emit('teacher-video-paused');
-    //             });
+        const dRoom = this.drawingData.get(classId);
+        dRoom.data = [];
+        const room = this.rooms.get(classId);
 
-    //             break;
-    //         }
-    //         let student;
-    //         if (room.teacher.socket.id !== socket.id) {
-    //             for (const [studentId, roomStudent] of room.students) {
-    //                 if (roomStudent.socket.id === socket.id) {
-    //                     this.server.to(room.teacher.socket.id).emit('student-disconnected', { studentId });
-    //                     if (roomStudent.consumerTransport) roomStudent.consumerTransport.close();
-    //                     if (roomStudent.producerTransport) roomStudent.producerTransport.close();
-    //                 }
-    //                 room.students.delete(studentId);
-    //                 console.log(room.students.keys());
-    //                 break;
-    //             }
-    //         }
-    //     }
-    // }
+        room.studentIds.forEach(sId => {
+            const student = room.students.get(sId);
+
+            if (student.socket) {
+                this.server.to(student.socket.id).emit('clear-drawing');
+            }
+        });
+    }
+
+    @SubscribeMessage('new-textbox-created')
+    async textBoxCreated(@MessageBody() data) {
+        const { classId, position, id } = data;
+
+        const room = this.rooms.get(classId);
+
+        room.studentIds.forEach(sId => {
+            const student = room.students.get(sId);
+
+            if (student.socket) {
+                this.server.to(student.socket.id).emit('textbox-created', { position, id });
+            }
+        });
+    }
+
 }
 

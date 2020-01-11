@@ -40,9 +40,9 @@ export class UserService {
         const { username, password } = loginuserDto;
         const user = await this.userRepository.findOne({
             where: {
-                username,
+                email:username,
             },
-            select: ['username', 'password', 'id'],
+            select: ['username', 'password', 'id', 'isAdmin'],
         });
         if (!user) {
             throw new HttpException('User not found', 404);
@@ -78,47 +78,67 @@ export class UserService {
         return user;
     }
 
-    //     async findById(id: string) {
-    //         const user = await this.userRepository.findOne({ id });
-    //         if (!user) {
-    //             throw new HttpException(`User not found with Id : ${id}`, 404);
-    //         }
-    //         return user;
-    //     }
+    async getAllStudents() {
+        return await this.studentRepository.find({ where: { isAdmin: false } });
+    }
 
-    //     async findByEmail(email: string) {
-    //         const user = await this.userRepository.findOne({ email });
-    //         if (!user) {
-    //             throw new HttpException(`User not found with Email : ${email}`, 404);
-    //         }
-    //         return user;
-    //     }
+    async getAllteachers() {
+        return await this.teacherRepository.find({});
+    }
 
-    //     async sendMail(user: Partial<User>) {
-    //         const msg = {
-    //             to: user.email,
-    //             from: 'test@example.com',
-    //             subject: 'Sending with SendGrid is Fun',
-    //             text: 'and easy to do anywhere, even with Node.js',
-    //             html: 'and easy to do anywhere, even with Node.js',
-    //         };
 
-    //         sgMail.send(msg);
-    //     }
+    async findTeacher(id: string) {
+        return await this.teacherRepository.findOne({ id });
+    }
 
-    //     async verifyEmail(emailVerifyDto: EmailVerifyDto) {
-    //         const user = await this.findByEmail(emailVerifyDto.email);
-    //         if (!user || emailVerifyDto.key !== user.key) {
-    //             return false;
-    //         }
-    //         user.active = true;
-    //         user.expiresAt = new Date();
-    //         user.key = null;
-    //         await this.userRepository.save(user);
-    //         return true;
-    //     }
+    async deleteStudent(id: string) {
+        return await this.studentRepository.delete(id);
+    }
 
-    //     async update(user: User) {
-    //         return await this.userRepository.save(user);
-    //     }
+    async deleteTeacher(id: string) {
+        return await this.teacherRepository.delete(id);
+    }
+
+    async getTotalStudents() {
+        return await this.studentRepository.count();
+    }
+
+    async getTotalTeachers() {
+        return await this.teacherRepository.count();
+    }
+    
+    async updateTeacher({ id, name, email,password }) {
+        const teacher = await this.teacherRepository.findOne(id);
+        if(name !=undefined  && name.length > 0) {
+            teacher.name = name;
+        }
+
+        if(email !=undefined  && email.length > 0) {
+            teacher.email = email;
+        }
+
+        if(password !=undefined  && password.length > 0) {
+            teacher.password = password;
+        }
+
+        return await this.teacherRepository.save(teacher);
+    }
+
+    async updateStudent({ id, name, email,password }) {
+        const student = await this.studentRepository.findOne(id);
+        if(name !=undefined  && name.length > 0) {
+            student.name = name;
+        }
+
+        if(email !=undefined  && email.length > 0) {
+            student.email = email;
+            student.username = email;
+        }
+
+        if(password !=undefined  && password.length > 0) {
+            student.password = password;
+        }
+
+        return await this.studentRepository.save(student);
+    }
 }

@@ -11,6 +11,12 @@ export class User {
     @Index({ unique: true })
     username: string;
 
+    @Column({ default: false })
+    isAdmin: boolean;
+
+    @Column()
+    name:string;
+
     @Column({ nullable: false, select: false })
     password: string;
 

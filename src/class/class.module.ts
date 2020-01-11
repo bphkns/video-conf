@@ -6,9 +6,10 @@ import { ClassService } from './class.service';
 import { ClassController } from './class.controller';
 import { AuthModule } from '../shared/auth/auth.module';
 import { ClassGateway } from './gateways/class.gateway';
+import { UserModule } from '../user/user.module';
 
 @Module({
-    imports: [TypeOrmModule.forFeature([ClassRepository]), SubjectModule, AuthModule],
+    imports: [TypeOrmModule.forFeature([ClassRepository]), SubjectModule, AuthModule, UserModule],
     controllers: [ClassController],
     providers: [ClassService],
     exports: [ClassService],
